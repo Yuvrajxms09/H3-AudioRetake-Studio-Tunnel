@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+runtime/
+*.log
+*.mp4
+!demo/*.mp4
+*.mov
+*.wav
+*.flac
+*.mp3
+*.safetensors
+*.ckpt
