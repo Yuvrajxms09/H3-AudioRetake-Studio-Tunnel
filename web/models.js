@@ -7,6 +7,25 @@ const retakeModelDefs = [
   {id:"retakeAudioVae", node:"VAELoader", input:"vae_name", graph:"7", key:"vae_name", preferred:"minimax_h3_audio_vae_fp32.safetensors", hint:/minimax.*h3.*audio.*vae/i}
 ];
 function retakeOptions(info,node,input){const x=info?.[node]?.input?.required?.[input];return Array.isArray(x?.[0])?x[0]:(x?.[1]?.options||[]);}
+async function refreshSam3Models(){
+ const select=$('sam3Model'),status=$('sam3ModelStatus');
+ status.textContent='Checking ComfyUI for a SAM3 checkpoint…';
+ try{
+  const response=await fetch('/object_info/CheckpointLoaderSimple');
+  if(!response.ok)throw Error('Cannot read the ComfyUI checkpoint list.');
+  const info=await response.json(),models=retakeOptions(info,'CheckpointLoaderSimple','ckpt_name').filter(name=>/sam3/i.test(name));
+  let saved='';try{saved=localStorage.getItem('audio-retake.sam3Model')||'';}catch{}
+  const previous=select.value;
+  const preferred=select.value||select.dataset.preferred||'';
+  const selected=models.includes(preferred)?preferred:models.includes(saved)?saved:models.find(name=>/multiplex.*fp16|fp16.*multiplex/i.test(name))||models[0]||'';
+  select.replaceChildren();
+  if(!models.length){const option=document.createElement('option');option.value='';option.textContent='No SAM3 checkpoint installed';select.append(option);status.textContent='Install a SAM3 checkpoint in ComfyUI’s checkpoints folder, then refresh.';return;}
+  for(const name of models){const option=document.createElement('option');option.value=name;option.textContent=name;select.append(option);}
+  select.value=selected;select.dataset.preferred='';if(previous!==selected)window.dispatchEvent(new Event('studio-sam3-model-changed'));
+  status.textContent=`${models.length} SAM3 checkpoint${models.length===1?'':'s'} available.`;
+ }catch(error){select.replaceChildren();const option=document.createElement('option');option.value='';option.textContent='Could not load checkpoints';select.append(option);status.textContent=error.message;}
+}
+function sam3ModelName(){const name=$('sam3Model').value;if(!name)throw Error('Select an installed SAM3 checkpoint, then refresh the model list.');return name;}
 async function refreshRetakeModels(){
  $('modelStatus').textContent='Checking installed models…';
  try{
@@ -27,4 +46,7 @@ async function refreshRetakeModels(){
 }
 function applyModelSettings(graph){for(const def of retakeModelDefs){const value=$(def.id).value;if(!value){$('modelDetails').open=true;throw Error('Select all H3 models under H3 model setup.');}graph[def.graph].inputs[def.key]=value;}}
 $('refreshModels').onclick=refreshRetakeModels;
+ $('refreshSam3Models').onclick=refreshSam3Models;
+ $('sam3Model').addEventListener('change',()=>{try{localStorage.setItem('audio-retake.sam3Model',$('sam3Model').value);}catch{}window.dispatchEvent(new Event('studio-sam3-model-changed'));});
 refreshRetakeModels();
+refreshSam3Models();
