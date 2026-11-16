@@ -21,6 +21,7 @@ ALLOWED_ASSETS = {"index.html", "app.js", "models.js", "lip.js", "joint.js", "ac
 routes = PromptServer.instance.routes
 NO_CACHE = {"Cache-Control": "no-cache"}  # Page and scripts must update together.
 ALLOWED_ORIGINS_ENV = "H3_AUDIO_RETAKE_ALLOWED_ORIGINS"
+ALLOWED_ORIGINS_FILE_ENV = "H3_AUDIO_RETAKE_ALLOWED_ORIGINS_FILE"
 
 
 def normalize_origin(value, *, https_only=False):
@@ -50,13 +51,21 @@ def normalize_origin(value, *, https_only=False):
 
 
 def configured_tunnel_origins():
-    """Read exact HTTPS origins allowed through a loopback reverse tunnel."""
-    configured = os.environ.get(ALLOWED_ORIGINS_ENV, "")
+    """Read exact HTTPS origins from startup settings and a live config file."""
+    configured_values = [os.environ.get(ALLOWED_ORIGINS_ENV, "")]
+    config_path = os.environ.get(ALLOWED_ORIGINS_FILE_ENV, "").strip()
+    if config_path:
+        try:
+            configured_values.append(Path(config_path).read_text(encoding="utf-8"))
+        except OSError:
+            pass
+
     origins = set()
-    for value in configured.split(","):
-        origin = normalize_origin(value, https_only=True)
-        if origin:
-            origins.add(origin)
+    for configured in configured_values:
+        for value in re.split(r"[,\r\n]+", configured):
+            origin = normalize_origin(value, https_only=True)
+            if origin:
+                origins.add(origin)
     return origins
 
 

@@ -40,16 +40,38 @@ The Pika sampler node bundled here follows an experimental six-step ComfyUI sche
 
 The Studio UI and ComfyUI API share the same ComfyUI server and origin. A single tunnel to the ComfyUI HTTP address serves both; open `/audio-retake/` on that tunnel hostname. The browser submits workflows and reads results through that same origin.
 
-By default, Studio routes accept localhost only. To allow a tunnel, set `H3_AUDIO_RETAKE_ALLOWED_ORIGINS` in the ComfyUI process environment to one or more exact HTTPS origins, separated by commas:
+By default, Studio routes accept localhost only. For a stable tunnel hostname, set `H3_AUDIO_RETAKE_ALLOWED_ORIGINS` in the ComfyUI process environment to one or more exact HTTPS origins, separated by commas:
 
 ```bash
 export H3_AUDIO_RETAKE_ALLOWED_ORIGINS="https://studio.example.com,https://another-studio.example.net"
 python main.py
 ```
 
-Use origins only: include the scheme and hostname, with an optional port; do not include a path. The incoming `Host` must match a configured origin. Tunnel requests must reach ComfyUI from the same machine through a loopback connection, as with `cloudflared` running beside ComfyUI. Preserve the public hostname in the `Host` header; if the tunnel has an HTTP Host Header override, leave it unset or set it to that exact hostname. The Studio does not trust forwarded host or scheme headers. Restart ComfyUI after changing this setting.
+Use origins only: include the scheme and hostname, with an optional port; do not include a path. The incoming `Host` must match a configured origin. Tunnel requests must reach ComfyUI from the same machine through a loopback connection, as with `cloudflared` running beside ComfyUI. Preserve the public hostname in the `Host` header; if the tunnel has an HTTP Host Header override, leave it unset or set it to that exact hostname. The Studio does not trust forwarded host or scheme headers. Restart ComfyUI after changing this environment setting.
 
-For a Cloudflare Quick Tunnel, configure the exact `https://your-run.trycloudflare.com` origin printed for that run before ComfyUI starts. Quick Tunnel hostnames change between runs, so update the setting and restart ComfyUI each time. A stable tunnel hostname avoids that step.
+For a Quick Tunnel whose URL is created after ComfyUI starts, configure `H3_AUDIO_RETAKE_ALLOWED_ORIGINS_FILE` before starting ComfyUI. The file can be updated while ComfyUI is running; Studio rereads it for each request. For example, in Colab:
+
+```python
+allowed_origins_file = COMFYUI / "user" / "default" / "audio_retake_allowed_origins.txt"
+allowed_origins_file.parent.mkdir(parents=True, exist_ok=True)
+allowed_origins_file.write_text("", encoding="utf-8")
+os.environ.pop("H3_AUDIO_RETAKE_ALLOWED_ORIGINS", None)
+os.environ["H3_AUDIO_RETAKE_ALLOWED_ORIGINS_FILE"] = str(allowed_origins_file)
+```
+
+In the tunnel output loop, replace the URL-printing block with:
+
+```python
+match = re.search(r"https://[A-Za-z0-9-]+\.trycloudflare\.com", line)
+if match:
+    origin = match.group(0)
+    temporary_file = allowed_origins_file.with_suffix(".tmp")
+    temporary_file.write_text(origin + "\n", encoding="utf-8")
+    os.replace(temporary_file, allowed_origins_file)
+    print("ComfyUI URL:", origin)
+```
+
+Keep the same `cloudflared` process running; the URL remains valid until that process stops. The file accepts one origin per line or comma-separated origins. Invalid entries are ignored. Quick Tunnel hostnames change when a new tunnel is created, so write the new exact URL after each new tunnel starts.
 
 This setting adds no authentication. Anyone who can access the tunnel can use the ComfyUI server exposed through it, including its workflow and file APIs. Keep the URL private and stop the tunnel when finished.
 
