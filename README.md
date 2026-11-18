@@ -18,6 +18,8 @@ This independent repository is based on [Nebuluss/H3-AudioRetake-studio](https:/
 
 For the custom tunnel, SAM3 and LipForcing changes, implementation rationale, mask-coordinate details, failure guards and the Hemsworth run record, see [the implementation notes](docs/implementation-notes.md).
 
+For the broader PX-365 conversation handoff—including the text-driven Studio path, the supplied-audio FL2VA/Exact Audio Lock prototype, what was tested, what remains separate, and where the parent-workspace artifacts live—see [the fresh-chat handoff](docs/px365-fresh-chat-handoff.md).
+
 ## Install
 
 1. Install and start an up-to-date [ComfyUI](https://github.com/comfyanonymous/ComfyUI) with a working MiniMax H3 setup. This version is tested locally, with ComfyUI and the browser on the same machine.
