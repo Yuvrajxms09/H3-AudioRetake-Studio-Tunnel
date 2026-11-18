@@ -1,5 +1,7 @@
 """Audio Retake Studio: a ComfyUI interface and Pika sampler."""
 import asyncio
+import hashlib
+import importlib.util
 import ipaddress
 import json
 import math
@@ -7,9 +9,14 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
+
+# LipForcing sets this before importing InsightFace/ONNX Runtime. Set it here,
+# before ComfyUI can lazily import the optional preprocessing dependencies.
+os.environ.setdefault("ORT_DISABLE_THREAD_AFFINITY", "1")
 
 from aiohttp import web
 import folder_paths
@@ -22,6 +29,10 @@ routes = PromptServer.instance.routes
 NO_CACHE = {"Cache-Control": "no-cache"}  # Page and scripts must update together.
 ALLOWED_ORIGINS_ENV = "H3_AUDIO_RETAKE_ALLOWED_ORIGINS"
 ALLOWED_ORIGINS_FILE_ENV = "H3_AUDIO_RETAKE_ALLOWED_ORIGINS_FILE"
+LIPFORCING_ROOT_ENV = "LIPFORCING_ROOT"
+LIPFORCING_MASK_ENV = "LIPFORCING_MASK_PATH"
+_LIPFORCING_PROCESSORS = {}
+_LIPFORCING_PROCESSOR_LOCK = threading.RLock()
 
 
 def normalize_origin(value, *, https_only=False):
@@ -67,6 +78,83 @@ def configured_tunnel_origins():
             if origin:
                 origins.add(origin)
     return origins
+
+
+def lipforcing_installation():
+    """Resolve the notebook's LipForcing source and mask without its generator weights."""
+    configured_root = os.environ.get(LIPFORCING_ROOT_ENV, "").strip()
+    comfy_root = Path(getattr(folder_paths, "base_path", None) or Path.cwd()).resolve()
+    candidates = [Path(configured_root)] if configured_root else [
+        comfy_root.parent / "LipForcing",
+        Path.cwd() / "LipForcing",
+        ROOT.parent.parent.parent / "LipForcing",
+        Path("/content/LipForcing"),
+        Path("/workspace/LipForcing"),
+    ]
+    root = next((p.resolve() for p in candidates
+                 if p.is_dir() and (p / "OmniAvatar/utils/latentsync/image_processor.py").is_file()), None)
+    if root is None:
+        raise FileNotFoundError(
+            f"LipForcing source was not found. Set {LIPFORCING_ROOT_ENV} to the cloned LipForcing repository."
+        )
+
+    configured_mask = os.environ.get(LIPFORCING_MASK_ENV, "").strip()
+    masks = [Path(configured_mask)] if configured_mask else [
+        root / "weights/mask(1).png",  # exact custom mask path used by Lip_Sync (1).ipynb
+        root / "weights/mask.png",
+        root / "OmniAvatar/utils/latentsync/mask.png",
+    ]
+    mask_path = next((p.resolve() for p in masks if p.is_file()), None)
+    if mask_path is None:
+        raise FileNotFoundError(
+            f"LipForcing's mask template was not found. Set {LIPFORCING_MASK_ENV} to the notebook's mask(1).png."
+        )
+    return root, mask_path
+
+
+def lipforcing_config_key(root, mask_path):
+    """Fingerprint the exact upstream alignment code and mask used for preview/render."""
+    digest = hashlib.sha256(b"audio-retake-lipforcing-mask-v1\0")
+    for relative in (
+        "OmniAvatar/utils/latentsync/image_processor.py",
+        "OmniAvatar/utils/latentsync/affine_transform.py",
+        "OmniAvatar/utils/latentsync/face_detector.py",
+    ):
+        path = root / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(path.read_bytes())
+    digest.update(mask_path.read_bytes())
+    return digest.hexdigest()
+
+
+def lipforcing_readiness():
+    """Return an opaque config fingerprint and actionable readiness information."""
+    try:
+        root, mask_path = lipforcing_installation()
+        key = lipforcing_config_key(root, mask_path)
+    except (FileNotFoundError, OSError) as exc:
+        return {"available": False, "message": str(exc)}
+
+    missing = [name for name in ("torch", "torchvision", "cv2", "kornia", "einops", "insightface", "onnxruntime")
+               if importlib.util.find_spec(name) is None]
+    if missing:
+        return {
+            "available": False,
+            "config_key": key,
+            "message": "LipForcing preprocessing dependencies are missing: " + ", ".join(missing) + ".",
+        }
+    try:
+        import onnxruntime
+        providers = onnxruntime.get_available_providers()
+    except Exception as exc:
+        return {"available": False, "config_key": key, "message": f"ONNX Runtime could not load: {exc}"}
+    if "CUDAExecutionProvider" not in providers:
+        return {
+            "available": False,
+            "config_key": key,
+            "message": "LipForcing's InsightFace detector needs ONNX Runtime with CUDAExecutionProvider.",
+        }
+    return {"available": True, "config_key": key, "message": "LipForcing preprocessing is ready."}
 
 
 def local_request(request, *, write=False):
@@ -118,6 +206,12 @@ async def index(request):
 async def info(request):
     require_local(request)
     return web.json_response({"comfy_input": folder_paths.get_input_directory(), "path_separator": __import__("os").sep})
+
+
+@routes.get("/audio-retake/api/lipforcing/info")
+async def lipforcing_info(request):
+    require_local(request)
+    return web.json_response(lipforcing_readiness())
 
 
 @routes.get("/audio-retake/api/result/{name}")
@@ -305,6 +399,109 @@ class AudioRetakeTimedMask:
         return (spatial.expand(frames, -1, -1) * ramp.view(-1, 1, 1), ramp.view(-1, 1, 1))
 
 
+class AudioRetakeLipForcingMask:
+    """Warp LipForcing's aligned LatentSync mouth mask into H3's tracked-crop space."""
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "images": ("IMAGE",),
+            "config_key": ("STRING", {"default": "", "multiline": False}),
+        }}
+
+    RETURN_TYPES = ("MASK",)
+    RETURN_NAMES = ("regenerate_mask",)
+    FUNCTION = "build"
+    CATEGORY = "Audio Retake Studio"
+
+    def build(self, images, config_key):
+        import cv2
+        import numpy as np
+        import onnxruntime
+        import torch
+        import comfy.model_management as management
+
+        root, mask_path = lipforcing_installation()
+        current_key = lipforcing_config_key(root, mask_path)
+        if not config_key or config_key != current_key:
+            raise ValueError("LipForcing source or mask changed. Refresh and review the mask preview before rendering.")
+        if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+            raise RuntimeError("LipForcing face alignment requires ONNX Runtime with CUDAExecutionProvider.")
+        if images.ndim != 4 or images.shape[0] < 1 or images.shape[1:3] != (512, 512):
+            raise ValueError("LipForcing mask preparation expects the Studio's 512×512 tracked face crops.")
+
+        device = management.get_torch_device()
+        if device.type != "cuda":
+            raise RuntimeError("LipForcing's configured InsightFace detector requires a CUDA ComfyUI device.")
+
+        cache_key = (str(root), str(mask_path), str(device), current_key)
+        with _LIPFORCING_PROCESSOR_LOCK:
+            processor = _LIPFORCING_PROCESSORS.get(cache_key)
+            if processor is None:
+                _LIPFORCING_PROCESSORS.clear()
+                import sys
+                if str(root) not in sys.path:
+                    sys.path.insert(0, str(root))
+                from OmniAvatar.utils.latentsync.image_processor import ImageProcessor, load_fixed_mask
+
+                module_path = Path(sys.modules[ImageProcessor.__module__].__file__).resolve()
+                if os.path.commonpath((str(root), str(module_path))) != str(root):
+                    raise RuntimeError("A different OmniAvatar package is shadowing the configured LipForcing source.")
+                processor = ImageProcessor(
+                    resolution=512,
+                    device=str(device),
+                    mask_image=load_fixed_mask(512, mask_image_path=str(mask_path)),
+                    insightface_root=str(root / "checkpoints" / "auxiliary"),
+                )
+                _LIPFORCING_PROCESSORS[cache_key] = processor
+
+            # LipForcing smooths its affine transform sequentially. Reset between
+            # jobs, but keep that exact within-clip behavior for this batch.
+            processor.restorer.p_bias = None
+            keep_mask = processor.mask_image[0].detach().cpu().numpy().astype(np.float32)
+            face_width, face_height = processor.restorer.face_size
+            scale_x, scale_y = 512.0 / face_width, 512.0 / face_height
+            scale = np.array([
+                # Match OpenCV resize's half-pixel-center convention used by
+                # ImageProcessor when it resizes the affine crop to 512 square.
+                [scale_x, 0.0, 0.5 * scale_x - 0.5],
+                [0.0, scale_y, 0.5 * scale_y - 0.5],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float32)
+            masks = []
+            for frame_index, frame in enumerate(images):
+                management.throw_exception_if_processing_interrupted()
+                rgb = (frame[..., :3].detach().clamp(0, 1).cpu().numpy() * 255.0).round().astype(np.uint8)
+                try:
+                    _, _, affine = processor.affine_transform(rgb)
+                except RuntimeError as exc:
+                    raise RuntimeError(f"LipForcing face detection failed on tracked frame {frame_index}: {exc}") from exc
+                source_to_aligned = affine.detach().cpu().numpy().reshape(2, 3).astype(np.float32)
+                source_to_aligned = (scale @ np.vstack((source_to_aligned, [0.0, 0.0, 1.0])))[:2]
+
+                # The upstream mask is 1=preserve and 0=regenerate. Warp it back
+                # to the exact H3 crop coordinates; outside the aligned face is
+                # preserved, so it cannot accidentally expand the repair area.
+                keep_in_crop = cv2.warpAffine(
+                    keep_mask,
+                    source_to_aligned,
+                    (512, 512),
+                    flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=1.0,
+                )
+                regenerate = np.clip(1.0 - keep_in_crop, 0.0, 1.0)
+                if not np.isfinite(regenerate).all() or float(regenerate.max()) < 0.01:
+                    raise RuntimeError(f"LipForcing produced an empty mouth mask on tracked frame {frame_index}.")
+                masks.append(regenerate)
+
+            mask_batch = torch.from_numpy(np.stack(masks, axis=0).astype(np.float32))
+            print(
+                f"[Audio Retake Studio] LipForcing mask prepared: {len(masks)} tracked frames, "
+                f"template={mask_path.name}, config={current_key[:12]}"
+            )
+            return (mask_batch,)
+
+
 class AudioRetakeTranscribe:
     """Transcribe speech with word timings, using a local Whisper folder."""
     @classmethod
@@ -329,5 +526,5 @@ class AudioRetakeTranscribe:
         return {"ui": {"transcript": [json.dumps(words, ensure_ascii=False)]}, "result": (text,)}
 
 
-NODE_CLASS_MAPPINGS = {"AudioRetakePikaSampler": AudioRetakePikaSampler, "AudioRetakeTimedMask": AudioRetakeTimedMask, "AudioRetakeTranscribe": AudioRetakeTranscribe}
-NODE_DISPLAY_NAME_MAPPINGS = {"AudioRetakePikaSampler": "Audio Retake - Pika H3 Flex (experimental)", "AudioRetakeTimedMask": "Audio Retake - Timed AV Mask", "AudioRetakeTranscribe": "Audio Retake - Transcribe Words"}
+NODE_CLASS_MAPPINGS = {"AudioRetakePikaSampler": AudioRetakePikaSampler, "AudioRetakeTimedMask": AudioRetakeTimedMask, "AudioRetakeLipForcingMask": AudioRetakeLipForcingMask, "AudioRetakeTranscribe": AudioRetakeTranscribe}
+NODE_DISPLAY_NAME_MAPPINGS = {"AudioRetakePikaSampler": "Audio Retake - Pika H3 Flex (experimental)", "AudioRetakeTimedMask": "Audio Retake - Timed AV Mask", "AudioRetakeLipForcingMask": "Audio Retake - LipForcing Mouth Mask", "AudioRetakeTranscribe": "Audio Retake - Transcribe Words"}

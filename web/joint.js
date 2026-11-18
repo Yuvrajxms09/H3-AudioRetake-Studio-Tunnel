@@ -87,7 +87,7 @@ async function jointGraph(r){
  g['80']=sourceNode(source.path,r);g['83'].inputs.audio='AudioRepairStudio/'+sourceAudio;if(maskName)g['85'].inputs.image='AudioRepairStudio/'+maskName;
  if(r.pad){g['p1']={class_type:'ImageFromBatch',inputs:{image:['80',0],batch_index:4095,length:1}};g['p2']={class_type:'RepeatImageBatch',inputs:{image:['p1',0],amount:r.pad+3}};g['p3']={class_type:'ImageBatch',inputs:{image1:['80',0],image2:['p2',0]}};g['p4']={class_type:'ImageFromBatch',inputs:{image:['p3',0],batch_index:0,length:r.frames}};}
  if(lip.track)g['81']=trackerNode(r);else{const size=frameSize();g['81']={class_type:'ImageScale',inputs:{image:[r.pad?'p4':'80',0],upscale_method:'lanczos',width:size.width,height:size.height,crop:'disabled'}};Object.assign(g['11'].inputs,size,{length:r.frames});}
- delete g['86'];let mouthMask=['87',0];if(!voiceOnly()&&maskMode()==='sam3'){delete g['85'];delete g['87'];mouthMask=prepareSam3Mask(g,addSam3MaskNodes(g,['81',0],$('sam3Prompt').value.trim()));}else g['87'].inputs.image=['85',0];
+ delete g['86'];let mouthMask=['87',0];if(!voiceOnly()&&maskMode()==='sam3'){delete g['85'];delete g['87'];mouthMask=prepareSam3Mask(g,addSam3MaskNodes(g,['81',0],$('sam3Prompt').value.trim()));}else if(!voiceOnly()&&maskMode()==='lipforcing'){delete g['85'];delete g['87'];g['lf_mask']={class_type:'AudioRetakeLipForcingMask',inputs:{images:['81',0],config_key:lip.lipforcingMask.configKey}};mouthMask=['lf_mask',0];}else g['87'].inputs.image=['85',0];
  g['95']={class_type:'AudioRetakeTimedMask',inputs:{mask:mouthMask,frames:r.frames,start_seconds:r.start-r.clipStart,end_seconds:r.end-r.clipStart,feather_seconds:r.feather}};
  g['88'].inputs.video_mask=['95',0];g['88'].inputs.audio_mask=['95',1];
  g['93']={class_type:'ImageFromBatch',inputs:{image:['81',0],batch_index:lip.track?lip.refFrame:Math.floor(r.frames/2),length:1}};g['11'].inputs['ref_images.ref_image_0']=['93',0];
@@ -124,7 +124,7 @@ async function renderJoint(){
  if(!line&&!sfx)throw Error('Enter the words to speak under Audio takes.');
  const clash=tracksOn()&&passageClash(r.start,r.end,laneOf($('repairMode').value),turnAtSelection());if(clash)throw Error(`This passage overlaps ${clash.speaker} on the same track. Open that passage or change the selection.`);
  if($('repairMode').value==='joint'||lip.track){if(!lip.track||lip.track.source!==state.sourceFile||lip.track.key!==lipKey(r))throw Error('The passage or speaker changed. Track the face again.');}
- if(!voice&&!mouthMaskReady())throw Error(maskMode()==='sam3'?'Generate and review the SAM3 mask preview first.':'Draw a mouth mask on the tracked face first.');
+ if(!voice&&!mouthMaskReady())throw Error(maskMode()==='sam3'?'Generate and review the SAM3 mask preview first.':maskMode()==='lipforcing'?'Generate and review the LipForcing mask preview first.':'Draw a mouth mask on the tracked face first.');
  lipMsg('Preparing the retake…');const maskKey=maskFingerprint(),refFrame=lip.refFrame,seed=Number($('seed').value)||0,count=Number($('jointCount').value)||1,{graph,sourceName}=await jointGraph(r);
  lip.variants=[];renderVariants();
  for(let i=0;i<count;i++){
