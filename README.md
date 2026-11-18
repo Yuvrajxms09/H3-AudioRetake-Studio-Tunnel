@@ -16,6 +16,8 @@ This independent repository is based on [Nebuluss/H3-AudioRetake-studio](https:/
 
 [AGENTS.md](AGENTS.md) explains the current workflow, limitations, troubleshooting, research and safe testing for coding agents. Claude can also discover [CLAUDE.md](CLAUDE.md).
 
+For the custom tunnel, SAM3 and LipForcing changes, implementation rationale, mask-coordinate details, failure guards and the Hemsworth run record, see [the implementation notes](docs/implementation-notes.md).
+
 ## Install
 
 1. Install and start an up-to-date [ComfyUI](https://github.com/comfyanonymous/ComfyUI) with a working MiniMax H3 setup. This version is tested locally, with ComfyUI and the browser on the same machine.
