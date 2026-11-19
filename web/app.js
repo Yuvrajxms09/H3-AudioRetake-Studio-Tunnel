@@ -14,7 +14,25 @@ function draw(){drawWave(canvas,state.buffer?.getChannelData(0),'#64dda0');windo
 function copyBuffer(src){const out=audioContext.createBuffer(src.numberOfChannels,src.length,src.sampleRate);for(let c=0;c<src.numberOfChannels;c++)out.getChannelData(c).set(src.getChannelData(c));return out;}
 // A video with no sound track opens as silence, so Redo the SFX can give it one.
 async function decodeSource(file,data){try{return await audioContext.decodeAudioData(data.slice(0));}catch(e){if(!file.type.startsWith('video/'))throw e;const probe=document.createElement('video'),url=URL.createObjectURL(file);try{probe.src=url;await new Promise((resolve,reject)=>{probe.onloadedmetadata=resolve;probe.onerror=()=>reject(e);});return audioContext.createBuffer(2,Math.ceil(probe.duration*audioContext.sampleRate),audioContext.sampleRate);}finally{URL.revokeObjectURL(url);}}}
-async function loadSource(file){if(!file)return; try{message('Reading source…'); const data=await file.arrayBuffer(); const buffer=await decodeSource(file,data); if(state.sourceUrl)URL.revokeObjectURL(state.sourceUrl); state.sourceUrl=URL.createObjectURL(file); state.sourceFile=file; window.dispatchEvent(new Event('studio-source-changed')); state.buffer=buffer; state.start=0;state.end=Math.min(5,buffer.duration);state.zoom=1; $('waveWrap').style.width='100%';$('zoomLabel').textContent='1×';video.src=state.sourceUrl; video.style.display='block';$('emptyPreview').style.display='none';$('waveEmpty').style.display='none';$('sourceName').textContent=file.name;$('sourceDuration').textContent=fmt(buffer.duration);$('total').textContent=fmt(buffer.duration);syncSelection();draw();message('Source ready. Drag on the waveform to choose a passage.');}catch(e){message('Could not decode this file. Try a browser-supported video or audio format. '+e.message);}}
+let sourceLoadId=0;
+async function loadSource(file,{autoTranscribe=true}={}){
+ if(!file)return;
+ const loadId=++sourceLoadId;
+ try{
+  message('Reading source…');
+  const data=await file.arrayBuffer(),buffer=await decodeSource(file,data);
+  if(loadId!==sourceLoadId)return;
+  if(state.sourceUrl)URL.revokeObjectURL(state.sourceUrl);
+  state.sourceUrl=URL.createObjectURL(file);state.sourceFile=file;
+  window.dispatchEvent(new Event('studio-source-changed'));
+  state.buffer=buffer;state.start=0;state.end=Math.min(5,buffer.duration);state.zoom=1;
+  $('waveWrap').style.width='100%';$('zoomLabel').textContent='1×';video.src=state.sourceUrl;video.style.display='block';
+  $('emptyPreview').style.display='none';$('waveEmpty').style.display='none';$('sourceName').textContent=file.name;
+  $('sourceDuration').textContent=fmt(buffer.duration);$('total').textContent=fmt(buffer.duration);
+  syncSelection();draw();message('Source ready. Drag on the waveform to choose a passage.');
+  window.dispatchEvent(new CustomEvent('studio-source-ready',{detail:{autoTranscribe}}));
+ }catch(e){if(loadId===sourceLoadId)message('Could not decode this file. Try a browser-supported video or audio format. '+e.message);}
+}
 $('mediaFile').onchange=e=>loadSource(e.target.files[0]);$('mediaFile2').onchange=e=>loadSource(e.target.files[0]);
 function timeAt(e){const r=canvas.getBoundingClientRect();return clamp((e.clientX-r.left)/r.width,0,1)*state.buffer.duration;}
 canvas.onpointerdown=e=>{if(!state.buffer)return; canvas.setPointerCapture(e.pointerId);state.dragging=true;const t=timeAt(e),edge=6*state.buffer.duration/canvas.getBoundingClientRect().width,hasRange=state.end>state.start;if(hasRange&&Math.abs(t-state.start)<=edge)state.anchor=state.end;else if(hasRange&&Math.abs(t-state.end)<=edge)state.anchor=state.start;else{state.anchor=t;state.start=t;state.end=t;syncSelection();}};

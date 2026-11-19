@@ -217,3 +217,17 @@ For future code changes, verify in this order:
 5. Keep a copy of the source, API graph, model/node versions, prompt, seed, settings, logs and output metadata for reproducibility. Assess audio and video quality separately from execution success.
 
 The current README remains the install and operator guide. This file is the change/rationale and test-record supplement; when implementation changes, update both so setup steps and actual code do not diverge.
+
+## 10. Full-transcript edit automation
+
+The browser now supports this path for a video with an audible transcript:
+
+1. Opening a video starts the installed `AudioRetakeTranscribe` node automatically. Its timed word list becomes the immutable source transcript and the editable draft.
+2. Draft changes are mapped back to source word timings automatically. A short debounce avoids recomputing the word diff on every keystroke. The user does not have to open a timing-review step.
+3. **Generate edited video** checks that LipForcing preprocessing is available, confirms that `H3FaceTrackCrop` supports `largest_face`, and sequentially processes each changed passage.
+4. For each passage, the existing `H3FaceTrackCrop` API graph selects the largest detected face. The Joint Retake graph repeats that tracking in its own inference graph and connects `AudioRetakeLipForcingMask` directly to the timed H3 mask and face stitch. No standalone mask-preview job or mask approval is required.
+5. Each passage gets five Joint Retake candidates. Existing local Whisper word-match ranking selects one, then the normal full-video export mixes the repaired passages into the source and downloads `edited-dialogue.mp4`.
+
+Transcript-generated turns replace the previous generated transcript turns as a set, because every edited draft is diffed against the original ASR transcript. Existing non-transcript turns are retained. If any stage fails after the turn set is replaced, the browser restores the previous turns and leaves the user's draft available for retry. Project restore suppresses auto-transcription so saved words are not duplicated or overwritten.
+
+This path assumes one visible speaker and uses largest-face selection; it does not diarize speakers. An empty or silent source cannot provide word timings. Individual deletions are retaken together with adjacent retained words; deleting all speech in a passage is unsupported because Joint Retake requires replacement text. Punctuation-only changes do not run inference. The existing eight-passage limit and per-passage H3 duration limits still apply. Whisper ranking is a heuristic, not proof that H3 spoke every word exactly, and no live ComfyUI inference was run as part of this code change.

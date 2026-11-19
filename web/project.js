@@ -5,7 +5,7 @@ function openProjectDb(){if(projectStore.db)return projectStore.db;projectStore.
 async function projectAccess(mode,action){const db=await openProjectDb();return new Promise((resolve,reject)=>{const tx=db.transaction('project',mode),request=action(tx.objectStore('project'));tx.oncomplete=()=>resolve(request.result);tx.onerror=()=>reject(tx.error);});}
 function plainTurn(t){const repaired=t.repaired?.blob?{...t.repaired,url:null,takeIdentity:null}:null;return {...t,source:null,take:state.takes.indexOf(t.take),track:t.track?{...t.track,source:null,url:null,markedUrl:null}:null,repaired};}
 async function saveProject(){
- if(projectStore.restoring||!state.sourceFile||(!dialogue.turns.length&&!state.takes.length&&!tracksOn()&&!transcript.words.length))return; // Opening a file alone must not replace saved work.
+ if(projectStore.restoring||window.studioTranscriptGenerationRunning||!state.sourceFile||(!dialogue.turns.length&&!state.takes.length&&!tracksOn()&&!transcript.words.length))return; // Opening a file alone must not replace saved work.
  const active=activeTurn();if(active)saveTurnFields(active);
  const data={source:state.sourceFile,start:state.start,end:state.end,chosen:state.chosen,takes:state.takes.map(({blob,name,meta})=>({blob,name,meta})),turns:dialogue.turns.map(plainTurn),active:dialogue.active,words:transcript.words,transcriptDraft:transcript.draft,transcriptReviewed:transcript.reviewed,mode:$('repairMode').value,fields:Object.fromEntries(TURN_FIELDS.map(id=>[id,$(id).value])),voiceFile:$('voiceRef').files[0]||null,tracks:tracksOn()?{stem:tracks.stem,levels:laneLevels()}:null,savedAt:Date.now()};
  await projectAccess('readwrite',store=>store.put(data,'current'));
@@ -19,7 +19,7 @@ async function restoreProject(){
  const data=await projectAccess('readonly',store=>store.get('current'));if(!data)return;
  projectStore.restoring=true;$('restoreProject').hidden=true;
  try{
-  await loadSource(data.source);
+  await loadSource(data.source,{autoTranscribe:false});
   state.takes=[];state.chosen=null;for(const take of data.takes)addTake(take.blob,take.name,take.meta);state.chosen=data.chosen;renderTakes();
   for(const [id,value] of Object.entries(data.fields))$(id).value=value;$('repairMode').value=data.mode;syncRepairMode();setVoiceFile(data.voiceFile);refreshPrompt();
   transcript.words=data.words||[];transcript.draft=data.transcriptDraft??transcript.words.map(word=>word.word).join(' ');transcript.reviewed=data.transcriptReviewed?.draft===transcript.draft?data.transcriptReviewed:null;renderTranscript();

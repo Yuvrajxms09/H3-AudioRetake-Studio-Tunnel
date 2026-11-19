@@ -1,5 +1,5 @@
 'use strict';
-const dialogue={turns:[],active:null},batch={running:false,stop:false};
+const dialogue={turns:[],active:null},batch={running:false,stop:false,transcript:false};
 const turnColours=['#a4f4be','#efb8ff','#ffd99b','#97caff','#ffbdbd','#c1e88e'];
 const LANES=[{id:'voices',name:'VOICES',colour:'#97caff',redo:'Redo the voice here'},{id:'sound',name:'SOUND',colour:'#ffd99b',redo:'Redo the sound here'}];
 const tracks={stem:null,playing:[],placed:null,run:0,timer:null,lanes:Object.fromEntries(LANES.map(l=>[l.id,{db:0,mute:false,solo:false}]))};
@@ -11,7 +11,7 @@ function turnAtSelection(){const t=activeTurn();return t&&t.source===state.sourc
 const turnRange=t=>({...t.repaired.range,gainDb:clamp(Number(t.fields?.jointGainDb)||0,-12,12)});
 function colourFor(label){let labels=[];for(const t of dialogue.turns)if(!labels.includes(t.speaker))labels.push(t.speaker);return turnColours[Math.max(0,labels.indexOf(label))%turnColours.length];}
 function activeTurn(){return dialogue.turns.find(t=>t.id===dialogue.active)||null;}
-function resetLipView(){lip.point=null;lip.track=null;lip.mask=null;clearSam3Mask();lip.repaired=null;lip.refFrame=0;lip.refImage=null;updateFaceReferenceLabel();lip.pickSource=null;$('speakerArea').hidden=true;$('trackArea').hidden=true;$('lipCompare').hidden=true;$('lipTrack').disabled=true;}
+function resetLipView(){lip.point=null;lip.autoSpeaker=false;lip.track=null;lip.mask=null;clearSam3Mask();lip.repaired=null;lip.refFrame=0;lip.refImage=null;updateFaceReferenceLabel();lip.pickSource=null;$('speakerArea').hidden=true;$('trackArea').hidden=true;$('lipCompare').hidden=true;$('lipTrack').disabled=true;}
 const turnFade=t=>t.mode==='lip'?0:clamp(Number(t.fields?.jointFeather??200),0,500)/1000;
 function crossingNote(t){const same=dialogue.turns.filter(a=>turnLane(a)===turnLane(t)),previous=same[same.indexOf(t)-1],gap=previous?t.start-previous.end:0;return previous&&gap<turnFade(previous)+turnFade(t)?`${gap.toFixed(2)} s after ${previous.speaker}: the fades cross, check this join`:'';}
 function renderTurns(){
@@ -24,7 +24,7 @@ function renderTurns(){
   const remove=document.createElement('button');remove.type='button';remove.textContent='×';remove.setAttribute('aria-label',`Remove ${t.speaker} at ${fmt(t.start)}`);remove.onclick=()=>{dialogue.turns=dialogue.turns.filter(a=>a.id!==t.id);if(dialogue.active===t.id){dialogue.active=null;resetLipView();}$('turnStatus').textContent='Turn removed.';renderTurns();};row.append(dot,info,open,remove);list.append(row);
   if(state.buffer){const m=document.createElement('div');m.className='turn-marker';m.style.setProperty('--turn-colour',colour);m.style.left=(t.start/state.buffer.duration*100)+'%';m.style.width=((t.end-t.start)/state.buffer.duration*100)+'%';const tag=document.createElement('span');tag.textContent=t.speaker;m.append(tag);markers.append(m);}
  }
- $('renderTurns').disabled=!batch.running&&!dialogue.turns.some(t=>!t.repaired);
+ $('renderTurns').disabled=batch.transcript||(!batch.running&&!dialogue.turns.some(t=>!t.repaired));$('renderTurns').textContent=batch.transcript?'Generating transcript…':batch.running?'■ Stop after this turn':'▶ Render all turns';
  $('exportTurns').disabled=batch.running||dialogue.turns.length===0||dialogue.turns.some(t=>!t.repaired);
  refreshTracks();
  window.dispatchEvent(new Event('studio-project-changed'));
@@ -41,7 +41,8 @@ function openTurn(t){
  const previous=activeTurn();if(previous)saveTurnFields(previous);
  dialogue.active=t.id;state.start=t.start;state.end=t.end;syncSelection();state.chosen=t.take?state.takes.indexOf(t.take):null;if(state.chosen<0)state.chosen=null;renderTakes();$('takeOffset').value=t.offset||0;
  resetLipView();loadTurnFields(t);$('repairMode').value=t.mode||$('repairMode').value;$('maskMode').value=t.fields?.maskMode||t.maskMode||'lipforcing';$('sam3Prompt').value=t.fields?.sam3Prompt||t.sam3Prompt||'lower face including lips, mouth, jaw, and chin';$('sam3Expansion').value=String(t.fields?.sam3Expansion??t.sam3Expansion??0);const savedSam3Model=t.fields?.sam3Model||t.sam3Model||'';if(savedSam3Model){$('sam3Model').dataset.preferred=savedSam3Model;if([...$('sam3Model').options].some(option=>option.value===savedSam3Model))$('sam3Model').value=savedSam3Model;}syncRepairMode();updateMaskModeUI();$('lipDetector').value=t.detector||'face_yolov8m.pt';$('maskSoftness').value=t.softness??14;$('maskSoftnessValue').textContent=$('maskSoftness').value+' px';$('lipDenoise').value=t.denoise??0.6;updateLipDenoiseLabel();$('faceColorMatch').value=t.colorMatch??0.25;$('faceColorMatchValue').textContent=Number($('faceColorMatch').value).toFixed(2);
- if(t.track&&t.source===state.sourceFile){lip.point={...t.point};lip.pickSource=state.sourceFile;lip.pickStart=t.start;lip.pickEnd=t.end;lip.track=t.track;lip.refFrame=t.refFrame||0;lip.refImage=t.refImage||null;updateFaceReferenceLabel();lip.mask=t.mask?{...t.mask}:null;lip.repaired=t.repaired?{...t.repaired,chosen:state.chosen,takeIdentity:t.take}:null;$('trackVideo').src=t.track.url;$('speakerTrackVideo').src=t.track.markedUrl||'';$('trackArea').hidden=false;$('lipTrack').disabled=false;drawMask();if($('maskMode').value==='lipforcing'&&t.lipforcingMaskPreview)restoreLipForcingMaskPreview(t.lipforcingMaskPreview,t.lipforcingMaskConfigKey||'',t.lipforcingMaskVersion||0);else if(t.sam3MaskPreview)restoreSam3MaskPreview(t.sam3MaskPreview,t.fields?.sam3Model||t.sam3Model||'',t.sam3MaskVersion||0);else updateMaskModeUI();if(lip.repaired){$('compareOriginal').src=state.sourceUrl;$('compareRepaired').src=lip.repaired.url;$('lipCompare').hidden=false;}}
+ if(t.track&&t.source===state.sourceFile){lip.point=t.point?{...t.point}:null;lip.pickSource=state.sourceFile;lip.pickStart=t.start;lip.pickEnd=t.end;lip.track=t.track;lip.refFrame=t.refFrame||0;lip.refImage=t.refImage||null;updateFaceReferenceLabel();lip.mask=t.mask?{...t.mask}:null;lip.repaired=t.repaired?{...t.repaired,chosen:state.chosen,takeIdentity:t.take}:null;$('trackVideo').src=t.track.url;$('speakerTrackVideo').src=t.track.markedUrl||'';$('trackArea').hidden=false;$('lipTrack').disabled=false;drawMask();if($('maskMode').value==='lipforcing'&&t.lipforcingMaskPreview)restoreLipForcingMaskPreview(t.lipforcingMaskPreview,t.lipforcingMaskConfigKey||'',t.lipforcingMaskVersion||0);else if(t.sam3MaskPreview)restoreSam3MaskPreview(t.sam3MaskPreview,t.fields?.sam3Model||t.sam3Model||'',t.sam3MaskVersion||0);else updateMaskModeUI();if(lip.repaired){$('compareOriginal').src=state.sourceUrl;$('compareRepaired').src=lip.repaired.url;$('lipCompare').hidden=false;}}
+ if(t.transcriptEdit&&t.track&&!t.lipforcingMaskPreview)$('lipforcingPreviewStatus').textContent='The LipForcing mask was applied inside Joint Retake. A separate mask preview is optional.';
  if(!t.track&&t.repaired?.joint&&t.source===state.sourceFile){lip.repaired={...t.repaired};$('compareOriginal').src=state.sourceUrl;$('compareRepaired').src=lip.repaired.url;$('lipCompare').hidden=false;}
  $('turnStatus').textContent=`${t.speaker} selected. ${voiceOnly()?'Fill in the Retake panel, then render.':'Choose a take and track this speaker’s face for this passage.'}`;renderTurns();
 }
@@ -50,12 +51,12 @@ function addPassage(speaker){readRange();if(!state.sourceFile||!state.buffer||st
 function queueTranscriptEdits(){
  const issue=transcriptQueueIssue();
  if(issue)throw Error(issue);
-
  const speaker=$('speakerLabel').value.trim()||'Speaker 1';
  leaveTurn();
  setRepairMode('joint');
  $('maskMode').value='lipforcing';
  $('maskMode').dispatchEvent(new Event('change'));
+ $('jointCount').value='5';
  const fields=Object.fromEntries(TURN_FIELDS.map(id=>[id,$(id).value]));
  const created=transcript.reviewed.changes.map(change=>{
   const turn=makePassage(speaker,change.start,change.end,'joint');
@@ -63,16 +64,17 @@ function queueTranscriptEdits(){
   turn.offset=0;
   turn.fields={...fields,prompt:change.targetText,jointCount:'5',maskMode:'lipforcing'};
   turn.voiceFile=$('voiceRef').files[0]||null;
+  turn.autoSpeaker=true;
   turn.transcriptEdit={sourceText:change.sourceText,targetText:change.targetText,kind:change.kind,expandedForContext:change.expandedForContext};
   return turn;
  });
-
- dialogue.turns=[...dialogue.turns,...created].sort((a,b)=>a.start-b.start);
+ const retained=dialogue.turns.filter(turn=>!turn.transcriptEdit);
+ dialogue.turns=[...retained,...created].sort((a,b)=>a.start-b.start);
  dialogue.active=null;
  renderTurns();
- $('turnStatus').textContent='Queued '+created.length+' transcript edit'+(created.length===1?'':'s')+'. Open each turn, track the speaker and review its LipForcing mask, then render. Each turn has five H3 variations.';
- $('transcriptEditStatus').textContent='Queued '+created.length+' Joint Retake turns with LipForcing selected. Prepare and review the mask for each turn, render the five variations, choose a result, then export.';
- window.dispatchEvent(new Event('studio-project-changed'));
+ $('turnStatus').textContent=`Preparing ${created.length} edited passage${created.length===1?'':'s'} with automatic speaker tracking and LipForcing masks.`;
+ $('transcriptEditStatus').textContent=`Mapped ${created.length} changed passage${created.length===1?'':'s'}. Generating speech, mouth movement, and the complete video…`;
+ return created;
 }
 $('addTurn').onclick=()=>{try{const speaker=$('speakerLabel').value.trim()||'Speaker';openTurn(addPassage(speaker));const m=speaker.match(/^Speaker (\d+)$/);if(m)$('speakerLabel').value='Speaker '+(Number(m[1])+1);}catch(e){$('turnStatus').textContent=e.message;}};
 window.addEventListener('studio-source-changed',()=>{closeTracks();dialogue.turns=[];dialogue.active=null;resetLipView();renderTurns();$('turnStatus').textContent='Turn labels are manual; the studio does not identify speakers automatically.';});
@@ -81,7 +83,7 @@ window.addEventListener('studio-lip-changed',invalidateActiveTurn);
 window.addEventListener('studio-take-changed',invalidateActiveTurn);
 $('takeOffset').addEventListener('input',invalidateActiveTurn);
 // With tracks on, every render lands on a lane, even one made without adding a passage first.
-window.addEventListener('studio-lip-rendered',()=>{if(tracksOn()&&lip.repaired&&!turnAtSelection()){try{dialogue.active=addPassage(sfxMode()?'Sound':$('speakerLabel').value.trim()||'Speaker').id;}catch(e){tracksMsg(e.message);}}const t=turnAtSelection();if(!t||!lip.repaired||(!lip.track&&!lip.repaired.joint))return;t.point={...lip.point};t.track=lip.track;t.mask=lip.mask?{...lip.mask}:null;t.maskMode=maskMode();t.sam3Prompt=$('sam3Prompt').value;t.sam3Model=$('sam3Model').value;t.sam3Expansion=String(sam3Expansion());t.sam3MaskPreview=lip.sam3Mask?.blob||null;t.sam3MaskVersion=lip.sam3Mask?.version||null;t.lipforcingMaskPreview=lip.lipforcingMask?.blob||null;t.lipforcingMaskVersion=lip.lipforcingMask?.version||null;t.lipforcingMaskConfigKey=lip.lipforcingMask?.configKey||null;t.repaired=lip.repaired;saveTurnFields(t);t.take=state.takes[state.chosen];t.offset=Number($('takeOffset').value)||0;t.detector=$('lipDetector').value;t.mode=$('repairMode').value;t.refFrame=lip.refFrame;t.refImage=lip.refImage;t.softness=Number($('maskSoftness').value);t.denoise=lipDenoiseValue();t.colorMatch=Number($('faceColorMatch').value);if(!batch.running)$('turnStatus').textContent=`Repair saved to ${t.speaker}. Add another turn or export when all are ready.`;renderTurns();});
+window.addEventListener('studio-lip-rendered',()=>{if(tracksOn()&&lip.repaired&&!turnAtSelection()){try{dialogue.active=addPassage(sfxMode()?'Sound':$('speakerLabel').value.trim()||'Speaker').id;}catch(e){tracksMsg(e.message);}}const t=turnAtSelection();if(!t||!lip.repaired||(!lip.track&&!lip.repaired.joint))return;t.point=lip.point?{...lip.point}:null;t.autoSpeaker=lip.autoSpeaker;t.track=lip.track;t.mask=lip.mask?{...lip.mask}:null;t.maskMode=maskMode();t.sam3Prompt=$('sam3Prompt').value;t.sam3Model=$('sam3Model').value;t.sam3Expansion=String(sam3Expansion());t.sam3MaskPreview=lip.sam3Mask?.blob||null;t.sam3MaskVersion=lip.sam3Mask?.version||null;t.lipforcingMaskPreview=lip.lipforcingMask?.blob||null;t.lipforcingMaskVersion=lip.lipforcingMask?.version||null;t.lipforcingMaskConfigKey=lip.lipforcingMask?.configKey||null;t.repaired=lip.repaired;saveTurnFields(t);t.take=state.takes[state.chosen];t.offset=Number($('takeOffset').value)||0;t.detector=$('lipDetector').value;t.mode=$('repairMode').value;t.refFrame=lip.refFrame;t.refImage=lip.refImage;t.softness=Number($('maskSoftness').value);t.denoise=lipDenoiseValue();t.colorMatch=Number($('faceColorMatch').value);if(!batch.running)$('turnStatus').textContent=`Repair saved to ${t.speaker}. Add another turn or export when all are ready.`;renderTurns();});
 window.addEventListener('studio-face-ref',()=>{const t=activeTurn();if(!t||!lip.track||t.source!==state.sourceFile||Math.abs(t.start-state.start)>.001||Math.abs(t.end-state.end)>.001)return;t.point={...lip.point};t.track=lip.track;t.mode=$('repairMode').value;t.detector=$('lipDetector').value;t.refFrame=lip.refFrame;t.refImage=lip.refImage;renderTurns();});
 // Fades of close turns can cross. Each picture repair then stops halfway between the two lines.
 function turnSpans(turns){return turns.map(t=>{const same=turns.filter(a=>turnLane(a)===turnLane(t)),i=same.indexOf(t),span=t.repaired.joint?jointSpan(t.repaired.range):t,previous=same[i-1],next=same[i+1];return {start:previous?Math.max(span.start,(previous.end+t.start)/2):span.start,end:next?Math.min(span.end,(t.end+next.start)/2):span.end};});}
@@ -100,6 +102,88 @@ async function deliverMix(mixed,turns,name){
  const result=await(await api('/studio/export-turns',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source,audio,turns:pictures.length?pictures:[{repair:null,start:0,end:state.buffer.duration,clipStart:0}],matchColors:$('matchColors').checked})})).json();
  const a=document.createElement('a');a.href=result.url;a.download=name;a.click();
 }
+let transcriptAutomationDisabled=null;
+function setTranscriptAutomationBusy(busy){
+ window.studioTranscriptGenerationRunning=busy;
+ if(busy){
+  const controls=[...document.querySelectorAll('.workspace button,.workspace input,.workspace textarea,.workspace select')];if(!$('restoreProject').hidden)controls.push($('restoreProject'));
+  transcriptAutomationDisabled=new Map(controls.map(element=>[element,element.disabled]));for(const element of controls)element.disabled=true;
+  $('transcriptChangeList').inert=true;$('turnList').inert=true;$('waveScroll').inert=true;document.querySelector('.fine-edit').inert=true;
+ }else{
+  for(const [element,disabled] of transcriptAutomationDisabled||[])element.disabled=disabled;
+  transcriptAutomationDisabled=null;$('transcriptChangeList').inert=false;$('turnList').inert=false;$('waveScroll').inert=false;document.querySelector('.fine-edit').inert=false;
+ }
+ $('generateTranscriptEdits').textContent=busy?'Generating edited video…':'Generate edited video';
+ if(!busy)renderTranscriptChanges();
+}
+async function waitForVideoMetadata(){
+ if(video.videoWidth&&Number.isFinite(video.duration))return;
+ await new Promise((resolve,reject)=>{const timer=setTimeout(()=>finish(Error('The browser could not read this video’s dimensions. Reopen the video and try again.')),15000);function finish(error){clearTimeout(timer);video.removeEventListener('loadedmetadata',onReady);video.removeEventListener('error',onError);error?reject(error):resolve();}function onReady(){finish();}function onError(){finish(Error('The browser could not read this video’s dimensions.'));}video.addEventListener('loadedmetadata',onReady,{once:true});video.addEventListener('error',onError,{once:true});});
+ if(!video.videoWidth)throw Error('The browser could not read this video’s dimensions.');
+}
+function releaseTurnAssets(turns){
+ const urls=new Set();for(const turn of turns){if(turn.track?.url)urls.add(turn.track.url);if(turn.track?.markedUrl)urls.add(turn.track.markedUrl);if(turn.repaired?.url)urls.add(turn.repaired.url);}
+ for(const url of urls)URL.revokeObjectURL(url);
+}
+async function exportDialogueTurns(name='dialogue-repaired.mp4'){
+ if(!dialogue.turns.length||dialogue.turns.some(turn=>!turn.repaired||(!turn.track&&!turn.repaired.joint)||turn.source!==state.sourceFile))throw Error('Each dialogue passage needs a completed repair for this video.');
+ $('turnStatus').textContent='Combining the edited passages and exporting the complete video…';
+ await deliverMix(await mixDialogueTurns(),dialogue.turns,name);
+}
+async function generateTranscriptEdits(){
+ if(batch.running||window.studioTranscriptGenerationRunning)return;
+ if(!reviewTranscriptEdits())return;
+ const issue=transcriptQueueIssue();if(issue){$('transcriptEditStatus').textContent=issue;return;}
+ const source=state.sourceFile,draft=$('transcriptDraft').value;
+ setTranscriptAutomationBusy(true);
+ let snapshot=null,created=[],generatedTracks=[],finalTranscriptStatus='',priorVariantUrls=new Set(lip.variants.map(variant=>variant.url));
+ try{
+  $('transcriptEditStatus').textContent='Checking LipForcing and automatic speaker tracking…';
+  if(!source||!source.type.startsWith('video/')||!state.buffer)throw Error('Open a video with a readable audio track before generating transcript edits.');
+  const retainedTurns=dialogue.turns.filter(turn=>!turn.transcriptEdit);
+  if(retainedTurns.some(turn=>!turn.repaired||(!turn.track&&!turn.repaired.joint)||turn.source!==source))throw Error('Finish or remove the other dialogue turns before generating this transcript edit.');
+  const info=await lipForcingInfo();if(!info.available||!info.config_key)throw Error(info.message||'LipForcing preprocessing is not available in this ComfyUI session.');
+  const trackerInfo=await(await api('/object_info/H3FaceTrackCrop')).json(),trackerInputs=trackerInfo?.H3FaceTrackCrop?.input,selection=trackerInputs?.required?.select||trackerInputs?.optional?.select,selectionOptions=Array.isArray(selection?.[0])?selection[0]:selection?.options;
+  if(Array.isArray(selectionOptions)&&!selectionOptions.includes('largest_face'))throw Error('The installed face tracker does not support automatic single-speaker selection. Update the H3 face-tracking node pack.');
+  if(source!==state.sourceFile||draft!==$('transcriptDraft').value)throw Error('The source or transcript changed during setup. Click Generate again.');
+  await waitForVideoMetadata();
+  snapshot={turns:dialogue.turns.slice(),active:dialogue.active,start:state.start,end:state.end,mode:$('repairMode').value,maskMode:$('maskMode').value,fields:Object.fromEntries(TURN_FIELDS.map(id=>[id,$(id).value])),voiceFile:$('voiceRef').files[0]||null};
+  batch.running=true;batch.stop=false;batch.transcript=true;
+  created=queueTranscriptEdits();renderTurns();
+  for(let index=0;index<created.length;index++){
+   const turn=created[index];openTurn(turn);await waitForVideoMetadata();
+   const range=lipRange();lip.autoSpeaker=true;turn.autoSpeaker=true;
+   $('transcriptEditStatus').textContent=`Passage ${index+1} of ${created.length}: tracking the visible speaker and preparing LipForcing…`;
+   const track=await trackFace(range,{autoSpeaker:true});generatedTracks.push(track);
+   lip.lipforcingMask={version:LIPFORCING_MASK_VERSION,key:lipforcingRequestFingerprint(info.config_key),configKey:info.config_key,source,trackKey:track.key};
+   $('jointCount').value='5';$('transcriptEditStatus').textContent=`Passage ${index+1} of ${created.length}: rendering five Joint Retake options…`;
+   await renderJoint();
+   if(!turn.repaired)throw Error(`Joint Retake did not finish passage ${index+1}. ${$('lipStatus').textContent}`);
+   $('lipforcingPreviewStatus').textContent='The LipForcing mask was applied inside Joint Retake. A separate mask preview is optional.';
+   for(const variant of lip.variants)if(variant.url&&variant.url!==turn.repaired.url)URL.revokeObjectURL(variant.url);
+  }
+  await exportDialogueTurns('edited-dialogue.mp4');
+  releaseTurnAssets(snapshot.turns.filter(turn=>turn.transcriptEdit));
+  $('transcriptEditStatus').textContent='Done. Your edited video was exported as edited-dialogue.mp4.';
+  finalTranscriptStatus='Done. Your edited video was exported as edited-dialogue.mp4.';
+  $('turnStatus').textContent='Edited dialogue video exported.';
+ }catch(error){
+  if(snapshot){
+   releaseTurnAssets(created);for(const track of generatedTracks){if(track.url)URL.revokeObjectURL(track.url);if(track.markedUrl)URL.revokeObjectURL(track.markedUrl);}
+   for(const variant of lip.variants)if(variant.url&&!priorVariantUrls.has(variant.url))URL.revokeObjectURL(variant.url);
+   dialogue.turns=snapshot.turns;dialogue.active=null;
+   for(const [id,value] of Object.entries(snapshot.fields))$(id).value=value;
+   $('repairMode').value=snapshot.mode;syncRepairMode();$('maskMode').value=snapshot.maskMode;setVoiceFile(snapshot.voiceFile);
+   state.start=snapshot.start;state.end=snapshot.end;syncSelection();resetLipView();updateMaskModeUI();renderTurns();
+   const active=snapshot.turns.find(turn=>turn.id===snapshot.active);if(active)openTurn(active);
+  }
+  finalTranscriptStatus='Generation stopped: '+error.message;$('transcriptEditStatus').textContent=finalTranscriptStatus;$('turnStatus').textContent=error.message;
+ }finally{
+  batch.running=false;batch.transcript=false;setTranscriptAutomationBusy(false);if(snapshot)window.dispatchEvent(new Event('studio-project-changed'));renderTurns();if(finalTranscriptStatus)$('transcriptEditStatus').textContent=finalTranscriptStatus;
+ }
+}
+$('generateTranscriptEdits').onclick=generateTranscriptEdits;
+
 // Renders what is missing in time order. A turn that is not ready is reported, and the others still run.
 $('renderTurns').onclick=async()=>{
  if(batch.running){batch.stop=true;$('renderTurns').disabled=true;$('renderTurns').textContent='Stopping after this turn…';return;}
@@ -109,7 +193,7 @@ $('renderTurns').onclick=async()=>{
  finally{batch.running=false;$('renderTurns').textContent='▶ Render all turns';renderTurns();}
  $('turnStatus').textContent=failed.length?`${done} rendered, ${failed.length} not. ${failed.join(' ')}`:batch.stop?`Stopped after ${done} ${done===1?'turn':'turns'}.`:`${done} ${done===1?'turn':'turns'} rendered. Listen to each one before exporting.`;
 };
-$('exportTurns').onclick=async()=>{try{if(!dialogue.turns.length||dialogue.turns.some(t=>!t.repaired||(!t.track&&!t.repaired.joint)||t.source!==state.sourceFile))throw Error('Each turn needs a completed lip-sync repair for this source.');$('exportTurns').disabled=true;$('turnStatus').textContent='Mixing the turns and exporting the complete video…';await deliverMix(await mixDialogueTurns(),dialogue.turns,'dialogue-repaired.mp4');$('turnStatus').textContent='Complete dialogue video exported. Review both speakers and transitions.';}catch(e){$('turnStatus').textContent=e.message;}finally{renderTurns();}};
+$('exportTurns').onclick=async()=>{try{$('exportTurns').disabled=true;await exportDialogueTurns();$('turnStatus').textContent='Complete dialogue video exported.';}catch(e){$('turnStatus').textContent=e.message;}finally{renderTurns();}};
 // Tracks: the source split into voices and everything else. Sound is the source minus Voices, so at 0 dB they add back to the source exactly.
 const tracksMsg=s=>{$('tracksStatus').textContent=s;},eachLane=()=>LANES.map(l=>tracks.lanes[l.id]);
 function audibleLanes(){const solo=eachLane().some(l=>l.solo);return eachLane().filter(l=>solo?l.solo:!l.mute);}

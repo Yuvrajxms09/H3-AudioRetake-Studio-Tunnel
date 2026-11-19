@@ -1,7 +1,7 @@
 'use strict';
 
 // Original word timing stays immutable; the editable script is a separate draft.
-const transcript = {words: [], anchor: null, draft: '', reviewed: null};
+const transcript = {words: [], anchor: null, draft: '', reviewed: null, requestId: 0, mapTimer: null};
 const WORD_PAD = .03;
 const TRANSCRIPT_DIFF_MAX_CELLS = 4000000;
 
@@ -183,18 +183,18 @@ function transcriptChangeIssues(changes) {
 }
 
 function transcriptQueueIssue() {
- if (!transcript.reviewed) return 'Review the edited transcript before queueing retakes.';
- if (transcript.reviewed.draft !== $('transcriptDraft').value) return 'The transcript changed after review. Review the changes again.';
+ if (!transcript.reviewed) return 'The edited transcript could not be mapped to source timings.';
+ if (transcript.reviewed.draft !== $('transcriptDraft').value) return 'The transcript changed while its timing map was being calculated. Try Generate again.';
  if (!transcript.reviewed.changes.length) return 'There are no spoken-word changes to queue.';
  if (!state.sourceFile || !state.sourceFile.type.startsWith('video/')) return 'Open a video source before queueing Joint Retakes.';
  const duration = state.buffer?.duration ?? video.duration;
  if (!Number.isFinite(duration) || duration * 24 < JOINT_MIN_FRAMES) return 'Joint Retake needs at least about 5.2 seconds of source video.';
  if (transcriptChangeIssues(transcript.reviewed.changes).size) return 'Fix the timing or unsupported edits shown below before queueing.';
- if (dialogue.turns.length + transcript.reviewed.changes.length > 8) return 'The Studio supports up to eight dialogue turns. Remove turns or queue fewer changed passages.';
- if (dialogue.turns.some(turn => turn.transcriptEdit)) return 'Transcript edits are already queued. Remove those turns before queueing a revised transcript.';
+ const existingTurns = dialogue.turns.filter(turn => !turn.transcriptEdit);
+ if (existingTurns.length + transcript.reviewed.changes.length > 8) return 'The Studio supports up to eight dialogue passages at a time. Reduce the number of separate edits before generating.';
 
  const lane = laneOf('joint');
- const occupied = dialogue.turns.filter(turn => !tracksOn() || turnLane(turn) === lane);
+ const occupied = existingTurns.filter(turn => !tracksOn() || turnLane(turn) === lane);
  for (const change of transcript.reviewed.changes) {
   if (occupied.some(turn => change.start < turn.end - .0001 && change.end > turn.start + .0001)) {
    return 'A changed passage overlaps an existing turn on the same track. Remove or adjust the conflicting turn first.';
@@ -215,14 +215,15 @@ function setTranscriptRange(change) {
 
 function renderTranscriptChanges() {
  const list = $('transcriptChangeList');
- const queue = $('queueTranscriptEdits');
+ const queue = $('generateTranscriptEdits');
  const status = $('transcriptEditStatus');
  list.replaceChildren();
  const reviewed = transcript.reviewed;
  list.hidden = !reviewed || !reviewed.changes.length;
  if (!reviewed) {
-  queue.disabled = true;
-  status.textContent = transcript.words.length ? 'Edit the script, then review its changed passages.' : 'Transcribe a source to start editing its script.';
+  const draftChanged=transcript.draft.trim()!==sourceTranscriptText().trim();
+  queue.disabled = !transcript.words.length || !draftChanged || Boolean(window.studioTranscriptGenerationRunning);
+  status.textContent = transcript.words.length ? draftChanged ? 'Calculating changed-word timings…' : 'Edit the transcript to generate a replacement.' : 'Open a video to transcribe it automatically.';
   return;
  }
  if (!reviewed.changes.length) {
@@ -310,11 +311,9 @@ function renderTranscriptChanges() {
  });
 
  const issue = transcriptQueueIssue();
- queue.disabled = Boolean(issue);
- queue.textContent = dialogue.turns.some(turn => turn.transcriptEdit)
-  ? 'Remove queued transcript turns to make a new set'
-  : 'Queue changed passages · 5 options each';
- status.textContent = issue || 'Review each mapped passage. Queueing creates one Joint Retake turn per passage, with five H3 variations for comparison.';
+ queue.disabled = Boolean(issue) || Boolean(window.studioTranscriptGenerationRunning);
+ queue.textContent = 'Generate edited video';
+ status.textContent = window.studioTranscriptGenerationRunning ? 'Generating the changed passages and exporting the full video…' : issue || 'Changed words are mapped to their original times automatically. Generate runs Joint Retake with LipForcing and chooses the closest transcript match from five variations per passage.';
 }
 
 function renderTranscriptEditor() {
@@ -362,41 +361,53 @@ function renderTranscript() {
  renderTranscriptEditor();
 }
 
-async function speechBuffer() {
+async function speechBuffer(sourceBuffer = state.buffer) {
  const sampleRate = 16000;
- const offline = new OfflineAudioContext(1, Math.ceil(state.buffer.duration * sampleRate), sampleRate);
+ const offline = new OfflineAudioContext(1, Math.ceil(sourceBuffer.duration * sampleRate), sampleRate);
  const node = offline.createBufferSource();
- node.buffer = state.buffer;
+ node.buffer = sourceBuffer;
  node.connect(offline.destination);
  node.start();
  return offline.startRendering();
 }
 
-$('transcribe').onclick = async () => {
- if (!state.buffer) return message('Load a source first.');
+async function transcribeSource({automatic = false} = {}) {
+ const source = state.sourceFile, buffer = state.buffer;
+ if (!source || !buffer) return message('Load a source first.');
+ if (automatic && !source.type.startsWith('video/')) return;
  const button = $('transcribe');
+ if (button.disabled) return;
+ const requestId = ++transcript.requestId;
  button.disabled = true;
  try {
-  message('Transcribing the source locally…');
-  const name = await uploadStudio(wav(await speechBuffer()), 'transcript_' + crypto.randomUUID() + '.wav');
+  message(automatic ? 'Transcribing the video…' : 'Transcribing the source…');
+  const name = await uploadStudio(wav(await speechBuffer(buffer)), 'transcript_' + crypto.randomUUID() + '.wav');
   const outputs = await queueLipGraph({
    '1': {class_type: 'LoadAudio', inputs: {audio: 'AudioRepairStudio/' + name}},
    '2': {class_type: 'AudioRetakeTranscribe', inputs: {audio: ['1', 0], language: $('language').value.trim()}}
   });
-  transcript.words = JSON.parse(outputs['2'].transcript[0]);
+  if (requestId !== transcript.requestId || source !== state.sourceFile) return;
+  const words = JSON.parse(outputs['2'].transcript[0]);
+  if (!Array.isArray(words)) throw Error('The transcription node returned an invalid word list.');
+  transcript.words = words.filter(word => Number.isFinite(word.start) && Number.isFinite(word.end) && word.end > word.start && String(word.word || '').trim());
   transcript.anchor = null;
   transcript.draft = sourceTranscriptText();
   transcript.reviewed = null;
   renderTranscript();
+  reviewTranscriptEdits({persist: !automatic});
   checkLine();
-  window.dispatchEvent(new Event('studio-project-changed'));
-  message('Transcript ready. Click words to select a passage, or edit the full script below.');
+  $('transcribe').textContent = 'Transcribe again';
+  message(transcript.words.length ? 'Full transcript ready. Edit any words below, then generate the edited video.' : 'No speech was recognized in this video, so there is no timed transcript to edit.');
  } catch (error) {
-  message('Transcription failed: ' + error.message);
+  if (requestId === transcript.requestId) message('Transcription failed: ' + error.message);
  } finally {
-  button.disabled = false;
+  if (requestId === transcript.requestId) button.disabled = false;
  }
-};
+}
+$('transcribe').onclick = () => transcribeSource();
+window.addEventListener('studio-source-ready', event => {
+ if (event.detail?.autoTranscribe) transcribeSource({automatic: true});
+});
 
 function syllables(text) {
  return text.toLowerCase().split(/\s+/).reduce((total, word) => {
@@ -431,17 +442,21 @@ function checkLine() {
  note.textContent = issues.join(' ');
 }
 
-function reviewTranscriptEdits() {
+function reviewTranscriptEdits({persist = true} = {}) {
+ clearTimeout(transcript.mapTimer);
+ transcript.mapTimer = null;
  try {
   transcript.draft = $('transcriptDraft').value;
   const changes = mapTranscriptChanges(transcript.draft);
   transcript.reviewed = {draft: transcript.draft, changes};
   renderTranscriptChanges();
-  window.dispatchEvent(new Event('studio-project-changed'));
+  if (persist) window.dispatchEvent(new Event('studio-project-changed'));
+  return true;
  } catch (error) {
   transcript.reviewed = null;
   renderTranscriptChanges();
   $('transcriptEditStatus').textContent = error.message;
+  return false;
  }
 }
 
@@ -449,22 +464,18 @@ $('transcriptDraft').addEventListener('input', () => {
  transcript.draft = $('transcriptDraft').value;
  transcript.reviewed = null;
  renderTranscriptChanges();
+ clearTimeout(transcript.mapTimer);
+ transcript.mapTimer = setTimeout(reviewTranscriptEdits, 250);
  window.dispatchEvent(new Event('studio-project-changed'));
 });
-$('reviewTranscriptEdits').onclick = reviewTranscriptEdits;
 $('resetTranscriptDraft').onclick = () => {
+ clearTimeout(transcript.mapTimer);
+ transcript.mapTimer = null;
  transcript.draft = sourceTranscriptText();
  transcript.reviewed = null;
  $('transcriptDraft').value = transcript.draft;
  renderTranscriptChanges();
  window.dispatchEvent(new Event('studio-project-changed'));
-};
-$('queueTranscriptEdits').onclick = () => {
- try {
-  queueTranscriptEdits();
- } catch (error) {
-  $('transcriptEditStatus').textContent = error.message;
- }
 };
 $('prompt').addEventListener('input', checkLine);
 window.addEventListener('studio-selection-changed', () => {
@@ -472,6 +483,11 @@ window.addEventListener('studio-selection-changed', () => {
  checkLine();
 });
 window.addEventListener('studio-source-changed', () => {
+ clearTimeout(transcript.mapTimer);
+ transcript.mapTimer = null;
+ transcript.requestId++;
+ $('transcribe').disabled = false;
+ $('transcribe').textContent = 'Transcribe';
  transcript.words = [];
  transcript.anchor = null;
  transcript.draft = '';
